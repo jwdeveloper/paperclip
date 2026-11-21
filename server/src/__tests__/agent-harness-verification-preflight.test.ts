@@ -269,4 +269,55 @@ describePostgres("saved harness account preflight", () => {
     await expect(verify()).resolves.toBe("complete");
     expect(allocate).toHaveBeenCalledTimes(2);
   });
+
+  // Verification must probe an SSH Runner agent the way its runs execute: the
+  // test-environment route and heartbeat admission both map the environment's
+  // remote-machine authentication to the Runner home mode.
+  async function useSshEnvironment(useHostAuth: boolean, runtimeConfig: Record<string, unknown>) {
+    const [environment] = await db.insert(environments).values({ name: `SSH ${randomUUID()}`, driver: "ssh", status: "active",
+      config: { host: "192.0.2.10", port: 22, username: "agent", remoteWorkspacePath: "/home/agent/work", useHostAuth } }).returning();
+    vi.mocked(environmentTests.agentEnvironmentTestService).mockImplementation((database, manager) => ({
+      ...realEnvironmentTests(database, manager),
+      resolveAdapterTestEnvironmentId: vi.fn().mockResolvedValue(environment.id),
+      assertAdapterTestEnvironmentForCompany: vi.fn().mockResolvedValue(undefined),
+      resolveAdapterTestExecutionContext: allocate,
+      testManagedEnvironment: probe,
+    }));
+    [agent] = await db.update(agents).set({ adapterType: "paperclip_runner", runtimeConfig, defaultEnvironmentId: environment.id,
+      adapterConfig: { provider: "codex", model: "gpt-5.5" } }).where(eq(agents.id, agent.id)).returning();
+    const hostProbe = vi.fn().mockResolvedValue({ ...passed, adapterType: "paperclip_runner",
+      checks: [{ code: "codex_hello_probe_passed", level: "info", message: "Fixture probe passed" }] });
+    vi.spyOn(serverAdapters, "requireServerAdapter").mockReturnValue({ testEnvironment: hostProbe } as never);
+    return hostProbe;
+  }
+
+  it("verifies an SSH agent using remote-machine authentication in its preconfigured home", async () => {
+    const hostProbe = await useSshEnvironment(true, {});
+    await expect(verify()).resolves.toBe("complete");
+    expect(hostProbe).toHaveBeenCalledOnce();
+    expect(hostProbe.mock.calls[0][0].config.homeMode).toBe("preconfigured");
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("uses remote-machine authentication instead of a saved AI connection, as runs do", async () => {
+    const hostProbe = await useSshEnvironment(true, { aiConnection: binding });
+    await expect(verify()).resolves.toBe("complete");
+    expect(hostProbe.mock.calls[0][0].config.homeMode).toBe("preconfigured");
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("verifies an SSH agent without remote-machine authentication in an isolated home with its AI connection", async () => {
+    await useSshEnvironment(false, { aiConnection: binding });
+    await db.update(agents).set({ adapterConfig: { provider: "opencode", model: "openrouter/anthropic/claude-sonnet-4.5" } })
+      .where(eq(agents.id, agent.id));
+    await expect(verify()).resolves.toBe("complete");
+    expect(probe).toHaveBeenCalledOnce();
+    expect(probe.mock.calls[0][1].config.homeMode).toBe("isolated");
+  });
+
+  it("refuses an SSH agent without remote-machine authentication or an AI connection before allocating a target", async () => {
+    await useSshEnvironment(false, {});
+    await expect(verify()).rejects.toMatchObject({ message: expect.stringContaining("enable authentication configured on the remote machine") });
+    expect(allocate).not.toHaveBeenCalled();
+  });
 });

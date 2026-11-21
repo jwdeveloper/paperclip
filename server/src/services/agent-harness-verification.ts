@@ -17,6 +17,7 @@ import { environmentService } from "./environments.js";
 import { secretService } from "./secrets.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { assertProviderApiPlacementPolicy, resolveProviderApiPlacement } from "./native-runtime/provider-api-placement.js";
+import { supportsPaperclipRunnerPreconfiguredHome } from "./native-runtime/provider-profile.js";
 import { museRunnerBroker } from "./muse-runner-broker.js";
 import { RUNNER_REVISION_MISMATCH_CODE } from "./runner-revision-mismatch.js";
 import { dotRunnerBroker } from "./dot-runner-broker.js";
@@ -109,6 +110,22 @@ export function agentHarnessVerificationService(db: Db, manager: PluginWorkerMan
     if (environmentId) {
       await tests.assertAdapterTestEnvironmentForCompany(agent.companyId, environmentId, agent.adapterType);
       const environment = await environments.getById(environmentId);
+      // Probe an SSH agent the way its runs execute (heartbeat execution
+      // configuration and the test-environment route): remote-machine
+      // authentication selects the preconfigured Runner home and replaces any
+      // managed AI connection; without it the agent needs a managed connection.
+      if (environment?.driver === "ssh") {
+        const useSshHostAuth = environment.config.useHostAuth !== false;
+        if (agent.adapterType === "paperclip_runner") {
+          config = { ...config, homeMode: useSshHostAuth
+            && supportsPaperclipRunnerPreconfiguredHome(agent.adapterConfig, { companyId: agent.companyId }) ? "preconfigured" : "isolated" };
+        }
+        if (useSshHostAuth) binding = undefined;
+        else if (!binding) {
+          throw Object.assign(new Error("Select an AI account for this agent or enable authentication configured on the remote machine in the SSH environment's advanced settings."),
+            { code: PLUGIN_RUNNER_AI_CONNECTION_REQUIRED });
+        }
+      }
       if (environment && environment.driver !== "local") {
         const image = environment.driver === "sandbox" ? await sandboxBinding(db, environment, agent.companyId).catch(() => null) : null;
         // Only an immutable image digest names the image a test ran in; a snapshot

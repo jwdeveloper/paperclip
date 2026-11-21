@@ -1,0 +1,51 @@
+# Fork-only: deploy master to the self-hosted Dokploy instance (project
+# code-factory, app "paperclip") on every push.
+#
+# Dokploy does not pass the commit to Docker builds, and the image needs
+# PAPERCLIP_BUILD_COMMIT to build the Runner provider pack. This job stamps the
+# pushed commit into the app's build arguments, then starts the deployment.
+#
+# Required repository secret: DOKPLOY_API_KEY (Dokploy -> Settings -> Profile ->
+# API/CLI). Keep Dokploy's own "Auto Deploy" off for this app so a push builds once.
+name: Dokploy deploy
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: dokploy-deploy
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: github.repository == 'jwdeveloper/paperclip'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DOKPLOY_URL: https://dokploy.domeczek.win
+      DOKPLOY_APPLICATION_ID: GrTTkDQ4VqYv8nwA9UfGj
+      DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+    steps:
+      - name: Stamp commit into build arguments
+        run: |
+          set -euo pipefail
+          test -n "$DOKPLOY_API_KEY" || { echo "::error::Missing DOKPLOY_API_KEY secret"; exit 1; }
+          body=$(jq -n --arg id "$DOKPLOY_APPLICATION_ID" --arg sha "$GITHUB_SHA" \
+            '{applicationId: $id, buildArgs: ("PAPERCLIP_BUILD_VERSION=fork-master\nPAPERCLIP_BUILD_COMMIT=" + $sha)}')
+          curl -fsS -X POST "$DOKPLOY_URL/api/application.update" \
+            -H "x-api-key: $DOKPLOY_API_KEY" -H "Content-Type: application/json" -d "$body" > /dev/null
+      - name: Start deployment
+        env:
+          HEAD_MESSAGE: ${{ github.event.head_commit.message || 'manual deploy' }}
+        run: |
+          set -euo pipefail
+          body=$(jq -n --arg id "$DOKPLOY_APPLICATION_ID" --arg sha "${GITHUB_SHA:0:12}" --arg msg "$HEAD_MESSAGE" \
+            '{applicationId: $id, title: ("master " + $sha), description: ($msg | split("\n")[0])}')
+          curl -fsS -X POST "$DOKPLOY_URL/api/application.deploy" \
+            -H "x-api-key: $DOKPLOY_API_KEY" -H "Content-Type: application/json" -d "$body" > /dev/null
+          echo "Deployment started for $GITHUB_SHA"
